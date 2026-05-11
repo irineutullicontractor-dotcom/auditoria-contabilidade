@@ -1,98 +1,83 @@
 import streamlit as st
 import pandas as pd
+import re
 import io
 
-# Configuração da página
-st.set_page_config(page_title="Auditoria Master NF", layout="wide")
+st.set_page_config(page_title="Processador de Folha Contábil", layout="wide")
 
-st.title("📊 Auditoria Master de Notas Fiscais")
+st.title("📊 Processador de Eventos Contábeis")
 st.markdown("""
-Arraste os 4 relatórios abaixo para processar a conferência automática.
-A aba de **Oficina** consolidará os pedidos numa única linha e verificará se a NF já foi resolvida no **Painel**.
+Esta ferramenta lê os eventos da planilha **Folha ADM**, soma os valores correspondentes 
+e preenche a coluna **VLR LANÇAMENTO** na planilha **FOLHA 02 - CONT**.
 """)
 
-# --- UPLOAD DOS FICHEIROS ---
+# Upload dos arquivos
 col1, col2 = st.columns(2)
 with col1:
-    file_nf = st.file_uploader("1. Relatório de NFs (Ex: 01.03 a 10.03)", type=['xlsx', 'csv'])
-    file_forn = st.file_uploader("2. Cadastro de Fornecedores", type=['xlsx', 'csv'])
+    file_adm = st.file_uploader("Upload: Folha - 02-2026 - ADM", type=["xlsx", "csv"])
 with col2:
-    file_painel = st.file_uploader("3. Relatório Painel", type=['xlsx', 'csv'])
-    file_relacao = st.file_uploader("4. Relatório Relação/Oficina", type=['xlsx', 'csv'])
+    file_cont = st.file_uploader("Upload: FOLHA 02 - CONT", type=["xlsx", "csv"])
 
-def carregar(file):
-    if file is None: return None
-    if file.name.endswith('.csv'):
-        return pd.read_csv(file)
-    return pd.read_excel(file)
+if file_adm and file_cont:
+    try:
+        # 1. Processamento da Planilha de Eventos (ADM)
+        # Lendo a partir da linha onde começam os dados dos eventos
+        if file_adm.name.endswith('csv'):
+            df_eventos = pd.read_csv(file_adm, skiprows=1)
+        else:
+            df_eventos = pd.read_excel(file_adm, skiprows=1)
 
-if st.button("🚀 Processar Auditoria"):
-    if not all([file_nf, file_forn, file_painel, file_relacao]):
-        st.error("Por favor, carregue os 4 ficheiros antes de processar.")
-    else:
-        # Carregamento
-        df_nf = carregar(file_nf)
-        df_forn = carregar(file_forn)
-        df_painel = carregar(file_painel)
-        df_relacao = carregar(file_relacao)
+        mapa_eventos = {}
 
-        # Mapeamento
-        NF_NUMERO, NF_CNPJ, NF_FORN, NF_DATA, NF_VALOR = 'Número (nNFSe)', 'Prestador (CNPJ / CPF)', 'Prestador (xNome)', 'Data da Emissão (dhEmi)', 'Valor Serviço (vServ)'
-        PED_FORN_PAINEL, PED_NUM_PAINEL, PED_NF_REF = 'Fornecedor', 'N° do Pedido', 'N° da Nota fiscal'
-        PED_FORN_REL, PED_NUM_REL = 'Cód. fornecedor', 'Nº do pedido'
-        FORN_COD, FORN_CNPJ, FORN_CRED = 'Cód. Fornecedor', 'CNPJCPF', 'Credor'
+        for _, row in df_eventos.iterrows():
+            # Lado Esquerdo (Coluna A - Evento, Coluna D - Valor)
+            try:
+                ev_esq = str(row.iloc[0]).strip()
+                val_esq = float(row.iloc[3])
+                if ev_esq.isdigit():
+                    mapa_eventos[int(ev_esq)] = mapa_eventos.get(int(ev_esq), 0) + val_esq
+            except: pass
+            
+            # Lado Direito (Coluna F - Evento, Coluna I - Valor)
+            try:
+                ev_dir = str(row.iloc[5]).strip()
+                val_dir = float(row.iloc[8])
+                if ev_dir.isdigit():
+                    mapa_eventos[int(ev_dir)] = mapa_eventos.get(int(ev_dir), 0) + val_dir
+            except: pass
 
-        # Limpezas
-        def limpar_cnpj(v):
-            num = "".join(filter(str.isdigit, str(v)))
-            return num.zfill(14) if len(num) > 11 else num.zfill(11)
+        # 2. Processamento da Planilha de Destino (CONT)
+        if file_cont.name.endswith('csv'):
+            df_dest = pd.read_csv(file_cont, skiprows=3)
+        else:
+            df_dest = pd.read_excel(file_cont, skiprows=3)
 
-        def limpar_cod(v):
-            return str(v).split('.')[0].strip().lstrip('0')
+        def calcular_soma(texto):
+            if pd.isna(texto): return 0.0
+            codigos = re.findall(r'\d+', str(texto))
+            return sum(mapa_eventos.get(int(cod), 0.0) for cod in codigos)
 
-        def extrair_nf(v):
-            if pd.isna(v) or v == "": return ""
-            return "".join(filter(str.isdigit, str(v).split('/')[-1])).strip()
-
-        df_nf[NF_CNPJ] = df_nf[NF_CNPJ].apply(limpar_cnpj)
-        df_nf['nf_limpa'] = df_nf[NF_NUMERO].astype(str).str.strip()
-        df_forn[FORN_CNPJ] = df_forn[FORN_CNPJ].apply(limpar_cnpj)
-        df_forn[FORN_COD] = df_forn[FORN_COD].apply(limpar_cod)
-        df_forn[FORN_CRED] = df_forn[FORN_CRED].str.strip().str.upper()
-
-        # --- LÓGICA PAINEL ---
-        df_painel[PED_FORN_PAINEL] = df_painel[PED_FORN_PAINEL].str.strip().str.upper()
-        df_painel['nf_extraida'] = df_painel[PED_NF_REF].apply(extrair_nf)
-        painel_com_cnpj = pd.merge(df_painel, df_forn[[FORN_CRED, FORN_CNPJ]], left_on=PED_FORN_PAINEL, right_on=FORN_CRED, how='left')
-        painel_com_cnpj['chave'] = painel_com_cnpj[FORN_CNPJ] + "_" + painel_com_cnpj['nf_extraida']
-        df_nf['chave'] = df_nf[NF_CNPJ] + "_" + df_nf['nf_limpa']
-
-        match_exato = pd.merge(df_nf, painel_com_cnpj, on='chave', how='inner')
-        match_exato['Status'] = "✅ NF Lançada"
+        # Assume que a coluna de descrição é a segunda (index 1) 
+        # e a de valor é a oitava (VLR LANÇAMENTO - index 7)
+        desc_col_name = df_dest.columns[1]
+        val_col_name = df_dest.columns[7]
         
-        nfs_restantes = df_nf[~df_nf['chave'].isin(match_exato['chave'])]
-        peds_disponiveis = painel_com_cnpj[~painel_com_cnpj[PED_NUM_PAINEL].isin(match_exato[PED_NUM_PAINEL].unique())]
-        sugestoes_painel = pd.merge(nfs_restantes, peds_disponiveis, left_on=NF_CNPJ, right_on=FORN_CNPJ, how='left')
-        sugestoes_painel['Status'] = sugestoes_painel[PED_NUM_PAINEL].apply(lambda x: "⚠️ Pedido Encontrado" if pd.notna(x) else "❌ Sem Pedido")
-        
-        resumo_painel = pd.concat([match_exato, sugestoes_painel], ignore_index=True)
-        resumo_painel = resumo_painel[[NF_NUMERO, NF_CNPJ, NF_FORN, NF_DATA, PED_NUM_PAINEL, PED_NF_REF, NF_VALOR, 'Status']].drop_duplicates()
+        df_dest[val_col_name] = df_dest[desc_col_name].apply(calcular_soma)
 
-        # --- LÓGICA OFICINA ---
-        df_relacao[PED_FORN_REL] = df_relacao[PED_FORN_REL].apply(limpar_cod)
-        rel_com_cnpj = pd.merge(df_relacao, df_forn[[FORN_COD, FORN_CNPJ]], left_on=PED_FORN_REL, right_on=FORN_COD, how='left')
-        peds_agrupados = rel_com_cnpj.groupby(FORN_CNPJ)[PED_NUM_REL].apply(lambda x: ", ".join(set(x.astype(str).unique()))).reset_index()
-        resumo_relacao = pd.merge(df_nf, peds_agrupados, left_on=NF_CNPJ, right_on=FORN_CNPJ, how='left')
-        
-        resolvidas = match_exato['nf_limpa'].unique()
-        resumo_relacao['Status'] = resumo_relacao.apply(lambda r: "✅ Resolvido no Painel" if r['nf_limpa'] in resolvidas else ("⚠️ Pendente (Oficina)" if pd.notna(r[PED_NUM_REL]) else "❌ Sem Pedido Oficina"), axis=1)
-        resumo_relacao = resumo_relacao[[NF_NUMERO, NF_CNPJ, NF_FORN, NF_DATA, PED_NUM_REL, NF_VALOR, 'Status']]
+        st.success("✅ Processamento concluído com sucesso!")
+        st.dataframe(df_dest.head(10))
 
-        # --- DOWNLOAD ---
+        # Botão para Download
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            resumo_painel.to_excel(writer, sheet_name='1. PAINEL', index=False)
-            resumo_relacao.to_excel(writer, sheet_name='2. OFICINA', index=False)
+            df_dest.to_excel(writer, index=False, sheet_name='Processado')
         
-        st.success("Conferência concluída!")
-        st.download_button(label="📥 Baixar Relatório Consolidado", data=output.getvalue(), file_name="AUDITORIA_MASTER.xlsx", mime="application/vnd.ms-excel")
+        st.download_button(
+            label="📥 Baixar Planilha Processada",
+            data=output.getvalue(),
+            file_name="FOLHA_02_CONT_ATUALIZADA.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    except Exception as e:
+        st.error(f"Erro ao processar arquivos: {e}")
