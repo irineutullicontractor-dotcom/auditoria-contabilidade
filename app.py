@@ -1,87 +1,95 @@
+
 import streamlit as st
-import pandas as pd
+from openpyxl import load_workbook
 import re
-import io
+from io import BytesIO
 
-st.set_page_config(page_title="Processador Contábil v4", layout="wide")
+st.set_page_config(page_title="Integração Folha", layout="wide")
 
-def converter_para_float(valor):
-    """Converte qualquer formato (1.250,50 ou 1250.5) para float."""
-    if pd.isna(valor) or valor == '': return 0.0
-    # Remove pontos de milhar e ajusta a vírgula decimal
-    s = str(valor).strip().replace('.', '').replace(',', '.')
-    try:
-        return float(s)
-    except:
-        return 0.0
+st.title("Integração Folha ADM x CONT")
 
-st.title("📊 Integração Folha ADM -> CONT (Aba ADMIN)")
+arquivo_adm = st.file_uploader(
+    "Selecione o arquivo Folha ADM",
+    type=["xlsx"]
+)
 
-file_adm = st.file_uploader("1. Planilha Folha - 02-2026 - ADM", type=["xlsx"])
-file_cont = st.file_uploader("2. Planilha FOLHA 02 - CONT", type=["xlsx"])
+arquivo_cont = st.file_uploader(
+    "Selecione o arquivo FOLHA CONT",
+    type=["xlsx"]
+)
 
-if file_adm and file_cont:
-    try:
-        # --- 1. MAPEAMENTO DE EVENTOS (ADM) ---
-        df_adm = pd.read_excel(file_adm, skiprows=1)
-        
-        mapa_eventos = {}
-        for _, row in df_adm.iterrows():
-            # Blocos: A/D (0,3) e F/I (5,8)
-            for ev_idx, val_idx in [(0, 3), (5, 8)]:
-                try:
-                    # Converte o código para string, remove o .0 se existir e limpa
-                    cod_str = str(row.iloc[ev_idx]).split('.')[0].strip()
-                    if cod_str.isdigit():
-                        cod_int = int(cod_str)
-                        valor_num = converter_para_float(row.iloc[val_idx])
-                        mapa_eventos[cod_int] = mapa_eventos.get(cod_int, 0) + valor_num
-                except:
-                    continue
+if arquivo_adm and arquivo_cont:
 
-        # --- 2. PROCESSAMENTO DA PLANILHA CONT (Aba ADMIN) ---
-        # Lemos sem forçar dtype para evitar o erro de 'str' vs 'int'
-        xls = pd.ExcelFile(file_cont)
-        if 'ADMIN' not in xls.sheet_names:
-            st.error(f"Erro: A aba 'ADMIN' não foi encontrada. As abas disponíveis são: {xls.sheet_names}")
-        else:
-            df_cont = pd.read_excel(xls, sheet_name='ADMIN', header=None)
+    # =========================
+    # LEITURA DOS EVENTOS
+    # =========================
+    wb_adm = load_workbook(arquivo_adm, data_only=True)
+    ws_adm = wb_adm[wb_adm.sheetnames[0]]
 
-            # Garante que existam colunas até a H (índice 7)
-            while df_cont.shape[1] < 8:
-                df_cont[df_cont.shape[1]] = ""
+    eventos = {}
 
-            def extrair_e_somar(celula):
-                if pd.isna(celula): return 0.0
-                # Pega todos os números na célula B (ex: 16, 50, 101...)
-                numeros = re.findall(r'\d+', str(celula))
-                return sum(mapa_eventos.get(int(n), 0.0) for n in numeros)
+    for row in range(3, ws_adm.max_row + 1):
 
-            # Processamento: Linha 4 (índice 3) em diante
-            # Coluna B (1) e Coluna H (7)
-            for i in range(len(df_cont)):
-                if i >= 3:
-                    conteudo_b = df_cont.iloc[i, 1]
-                    if pd.notna(conteudo_b):
-                        soma_total = extrair_e_somar(conteudo_b)
-                        # Gravamos o valor como número direto
-                        df_cont.iat[i, 7] = soma_total
+        # A/D
+        evento_1 = ws_adm[f"A{row}"].value
+        valor_1 = ws_adm[f"D{row}"].value
 
-            st.success("✅ Processamento concluído!")
-            st.write("Prévia dos valores calculados (Coluna H):")
-            st.dataframe(df_cont.iloc[3:].head(15))
+        if evento_1 is not None:
+            try:
+                codigo = int(evento_1)
+                valor = float(valor_1 or 0)
+                eventos[codigo] = eventos.get(codigo, 0) + valor
+            except:
+                pass
 
-            # --- 3. EXPORTAÇÃO ---
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df_cont.to_excel(writer, index=False, header=False, sheet_name='ADMIN')
-            
-            st.download_button(
-                label="📥 Baixar Planilha Pronta",
-                data=output.getvalue(),
-                file_name="FOLHA_02_CONT_ATUALIZADA.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+        # F/I
+        evento_2 = ws_adm[f"F{row}"].value
+        valor_2 = ws_adm[f"I{row}"].value
 
-    except Exception as e:
-        st.error(f"Erro inesperado: {e}")
+        if evento_2 is not None:
+            try:
+                codigo = int(evento_2)
+                valor = float(valor_2 or 0)
+                eventos[codigo] = eventos.get(codigo, 0) + valor
+            except:
+                pass
+
+    # =========================
+    # PREENCHER CONT
+    # =========================
+    wb_cont = load_workbook(arquivo_cont)
+    ws_cont = wb_cont["ADMIN"]
+
+    regex_codigos = re.compile(r"\\b\\d+\\b")
+
+    for row in range(5, ws_cont.max_row + 1):
+
+        texto_conta = ws_cont[f"B{row}"].value
+
+        if texto_conta:
+
+            codigos = regex_codigos.findall(str(texto_conta))
+
+            soma = 0
+
+            for codigo in codigos:
+                codigo_int = int(codigo)
+                soma += eventos.get(codigo_int, 0)
+
+            ws_cont[f"H{row}"] = soma
+
+    # =========================
+    # DOWNLOAD
+    # =========================
+    output = BytesIO()
+    wb_cont.save(output)
+    output.seek(0)
+
+    st.success("Arquivo processado com sucesso!")
+
+    st.download_button(
+        label="Baixar arquivo preenchido",
+        data=output,
+        file_name="FOLHA_02_CONT_PREENCHIDA.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
