@@ -13,11 +13,12 @@ st.title("Integração Folha ADM x CONT")
 st.write("""
 Este sistema:
 
-1. Lê os códigos de eventos da planilha ADM
-2. Soma os valores dos eventos repetidos
-3. Procura os códigos na planilha CONT
-4. Soma os respectivos valores
-5. Preenche a coluna H (VLR LANÇAMENTO)
+1. Lê os centros de custo automaticamente do ADM
+2. Lê os eventos dos blocos A/D e F/I
+3. Armazena os valores por Centro de Custo
+4. Procura os eventos na planilha CONT
+5. Soma os valores do respectivo Centro de Custo
+6. Preenche a coluna H (VLR LANÇAMENTO)
 """)
 
 # =========================
@@ -41,7 +42,7 @@ if arquivo_adm and arquivo_cont:
     with st.spinner("Processando arquivos..."):
 
         # =========================
-        # LEITURA DA PLANILHA ADM
+        # LEITURA ADM
         # =========================
         wb_adm = load_workbook(
             arquivo_adm,
@@ -50,98 +51,144 @@ if arquivo_adm and arquivo_cont:
 
         ws_adm = wb_adm[wb_adm.sheetnames[0]]
 
+        # Estrutura:
+        # eventos[cc][codigo] = valor
         eventos = {}
 
-        # Percorre linhas
-        for row in range(3, ws_adm.max_row + 1):
+        centro_custo_atual = None
 
-            # ====================================
-            # BLOCO 1
-            # EVENTO = COLUNA A
-            # VALOR  = COLUNA D
-            # ====================================
+        for row in range(1, ws_adm.max_row + 1):
+
+            texto_a = ws_adm[f"A{row}"].value
+
+            # =====================================
+            # IDENTIFICA NOVO CENTRO DE CUSTO
+            # =====================================
+            if texto_a:
+
+                texto_upper = str(texto_a).upper()
+
+                if "RELATORIO PARA CONTABILIDADE" in texto_upper:
+
+                    match = re.search(
+                        r"OBRA\s+(\d+)",
+                        texto_upper
+                    )
+
+                    if match:
+
+                        centro_custo_atual = int(
+                            match.group(1)
+                        )
+
+                        if centro_custo_atual not in eventos:
+
+                            eventos[
+                                centro_custo_atual
+                            ] = {}
+
+                    continue
+
+            # Se ainda não encontrou um CC
+            if centro_custo_atual is None:
+                continue
+
+            # =====================================
+            # BLOCO A / D
+            # =====================================
             evento_1 = ws_adm[f"A{row}"].value
             valor_1 = ws_adm[f"D{row}"].value
 
             if evento_1 not in [None, ""]:
 
                 try:
+
                     codigo = int(float(evento_1))
                     valor = float(valor_1 or 0)
 
-                    eventos[codigo] = (
-                        eventos.get(codigo, 0) + valor
+                    eventos[centro_custo_atual][codigo] = (
+                        eventos[centro_custo_atual].get(
+                            codigo,
+                            0
+                        ) + valor
                     )
 
                 except:
                     pass
 
-            # ====================================
-            # BLOCO 2
-            # EVENTO = COLUNA F
-            # VALOR  = COLUNA I
-            # ====================================
+            # =====================================
+            # BLOCO F / I
+            # =====================================
             evento_2 = ws_adm[f"F{row}"].value
             valor_2 = ws_adm[f"I{row}"].value
 
             if evento_2 not in [None, ""]:
 
                 try:
+
                     codigo = int(float(evento_2))
                     valor = float(valor_2 or 0)
 
-                    eventos[codigo] = (
-                        eventos.get(codigo, 0) + valor
+                    eventos[centro_custo_atual][codigo] = (
+                        eventos[centro_custo_atual].get(
+                            codigo,
+                            0
+                        ) + valor
                     )
 
                 except:
                     pass
 
         # =========================
-        # LEITURA DA PLANILHA CONT
+        # LEITURA CONT
         # =========================
-        wb_cont = load_workbook(arquivo_cont)
+        wb_cont = load_workbook(
+            arquivo_cont
+        )
 
         ws_cont = wb_cont["ADMIN"]
 
-        # Regex para encontrar códigos numéricos
         regex_codigos = re.compile(r"\d+")
 
         # =========================
-        # PREENCHIMENTO DA COLUNA H
+        # PREENCHIMENTO
         # =========================
         for row in range(5, ws_cont.max_row + 1):
 
-            texto_conta = ws_cont[f"B{row}"].value
+            conta = ws_cont[f"B{row}"].value
+            cc = ws_cont[f"C{row}"].value
 
-            if texto_conta:
+            if not conta:
+                continue
 
-                # Extrai todos os números da descrição
-                codigos = regex_codigos.findall(
-                    str(texto_conta)
-                )
+            try:
+                cc = int(float(cc))
+            except:
+                continue
 
-                soma = 0
+            codigos = regex_codigos.findall(
+                str(conta)
+            )
+
+            soma = 0
+
+            if cc in eventos:
 
                 for codigo in codigos:
 
-                    codigo_int = int(codigo)
-
-                    soma += eventos.get(
-                        codigo_int,
+                    soma += eventos[cc].get(
+                        int(codigo),
                         0
                     )
 
-                # Grava resultado na coluna H
-                celula = ws_cont[f"H{row}"]
+            celula = ws_cont[f"H{row}"]
 
-                celula.value = soma
+            celula.value = soma
 
-                # Formatação monetária
-                celula.number_format = '#,##0.00'
+            celula.number_format = '#,##0.00'
 
         # =========================
-        # GERAR DOWNLOAD
+        # DOWNLOAD
         # =========================
         output = BytesIO()
 
@@ -149,7 +196,9 @@ if arquivo_adm and arquivo_cont:
 
         output.seek(0)
 
-        st.success("Arquivo processado com sucesso!")
+        st.success(
+            "Arquivo processado com sucesso!"
+        )
 
         st.download_button(
             label="📥 Baixar Arquivo Preenchido",
